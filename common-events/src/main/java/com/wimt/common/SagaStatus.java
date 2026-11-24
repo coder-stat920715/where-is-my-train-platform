@@ -1,0 +1,6 @@
+package com.wimt.common;
+
+/** Saga state machine: STARTED -> ETA_CALCULATED -> BOARD_UPDATED -> COMPLETED, or COMPENSATING -> FAILED. */
+public enum SagaStatus {
+    STARTED, ETA_CALCULATED, BOARD_UPDATED, COMPLETED, COMPENSATING, FAILED
+}

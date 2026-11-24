@@ -1,0 +1,1820 @@
+{
+  "info": {
+    "name": "Where Is My Train - Platform Test Suite",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "# Where Is My Train - Postman test suite\n\nCovers every service: gateway (8080), ingestion (8081), saga (8082), ETA engine (8083), query (8084), Eureka (8761), Kafka Connect (8085), Zipkin (9411).\n\n## Setup\n1. Start infra: `docker compose up -d` then `./infra/debezium/register-connectors.sh`.\n2. Build and start the 6 services (README section 3). The simulator auto-starts for train 22895.\n3. Import this collection and `WhereIsMyTrain.local.postman_environment.json`, select the environment.\n4. Variables `journeyDate` and all timestamps are computed automatically (today, IST).\n\n## Recommended run order\n| Step | Folder | What it proves |\n|---|---|---|\n| 1 | 00 Infrastructure Health | everything is up, Debezium connectors RUNNING |\n| 2 | 01 Simulator | start/stop control |\n| 3 | 06 Query Side | live status / search / boards (while simulator runs) |\n| 4 | 03 Saga Orchestrator | COMPLETED sagas growing |\n| 5 | 02 Telemetry Ingestion | manual flow, idempotency, validation, anomalies (train 12841) |\n| 6 | 03 (FAILED) + 04 | saga compensation |\n| 7 | 05 ETA diagnostics, 07 Real-time | write-side state, WebSocket/SSE |\n| 8 | 08 Gateway, 09 Observability | rate limit, fallbacks, circuit breakers |\n\nRunner tips: for folders 02 and 03 use Delay = 2500 ms between requests so Debezium/Kafka/saga hops complete between steps. Do NOT run folder 08 'burst target' together with the others (it intentionally exhausts the rate limit).\nTo replay a finished simulation run `./infra/reset-demo.sh`.\n"
+  },
+  "item": [
+    {
+      "name": "00 - Infrastructure Health",
+      "description": "Run this folder FIRST. It proves every moving part is up before you test business flows.\nStart order: `docker compose up -d`, `./infra/debezium/register-connectors.sh`, then the 6 services (see README).",
+      "item": [
+        {
+          "name": "Eureka - registered services",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{eurekaUrl}}/eureka/apps",
+            "description": "**Purpose**\nConfirm every microservice registered with Eureka (service discovery).\n\n**Prerequisites**\ndiscovery-server running on 8761; the other 5 services started.\n\n**Steps**\n1. Send the request (it sends `Accept: application/json`).\n2. Open the Test Results tab.\n\n**Expected result**\n200 and applications API-GATEWAY, TELEMETRY-INGESTION-SERVICE, TRAIN-SAGA-ORCHESTRATOR, ETA-ENGINE-SERVICE, TRAIN-QUERY-SERVICE all listed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const apps = (pm.response.json().applications.application || []).map(a => a.name);",
+                  "  ['API-GATEWAY','TELEMETRY-INGESTION-SERVICE','TRAIN-SAGA-ORCHESTRATOR','ETA-ENGINE-SERVICE','TRAIN-QUERY-SERVICE'].forEach(n =>",
+                  "    pm.test(n + ' registered', () => pm.expect(apps).to.include(n)));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actuator health - api-gateway",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/actuator/health",
+            "description": "**Purpose**\nCheck api-gateway is UP (includes DB / Kafka / Redis / Mongo health indicators).\n\n**Prerequisites**\napi-gateway running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"status UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actuator health - telemetry-ingestion-service",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ingestionUrl}}/actuator/health",
+            "description": "**Purpose**\nCheck telemetry-ingestion-service is UP (includes DB / Kafka / Redis / Mongo health indicators).\n\n**Prerequisites**\ntelemetry-ingestion-service running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"status UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actuator health - train-saga-orchestrator",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{sagaUrl}}/actuator/health",
+            "description": "**Purpose**\nCheck train-saga-orchestrator is UP (includes DB / Kafka / Redis / Mongo health indicators).\n\n**Prerequisites**\ntrain-saga-orchestrator running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"status UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actuator health - eta-engine-service",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{etaUrl}}/actuator/health",
+            "description": "**Purpose**\nCheck eta-engine-service is UP (includes DB / Kafka / Redis / Mongo health indicators).\n\n**Prerequisites**\neta-engine-service running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"status UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Actuator health - train-query-service",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/actuator/health",
+            "description": "**Purpose**\nCheck train-query-service is UP (includes DB / Kafka / Redis / Mongo health indicators).\n\n**Prerequisites**\ntrain-query-service running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with `{\"status\":\"UP\"}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"status UP\", () => pm.expect(pm.response.json().status).to.eql(\"UP\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Kafka Connect - list connectors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{connectUrl}}/connectors",
+            "description": "**Purpose**\nVerify both Debezium outbox connectors are registered (Transactional Outbox -> Kafka CDC).\n\n**Prerequisites**\ndocker compose up; `./infra/debezium/register-connectors.sh` executed. Connect is on host port 8085.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 and the array contains telemetry-outbox-connector and eta-outbox-connector."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const c = pm.response.json();",
+                  "  pm.test('telemetry connector', () => pm.expect(c).to.include('telemetry-outbox-connector'));",
+                  "  pm.test('eta connector', () => pm.expect(c).to.include('eta-outbox-connector'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Kafka Connect - telemetry connector status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{connectUrl}}/connectors/telemetry-outbox-connector/status",
+            "description": "**Purpose**\nConnector and task must be RUNNING, otherwise events never leave the outbox table.\n\n**Prerequisites**\nConnector registered.\n\n**Steps**\n1. Send the request.\n2. If FAILED: check `docker compose logs connect` (usually Postgres not started with wal_level=logical, or DB missing).\n\n**Expected result**\nconnector.state and tasks[0].state are RUNNING."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const s = pm.response.json();",
+                  "  pm.test('connector RUNNING', () => pm.expect(s.connector.state).to.eql('RUNNING'));",
+                  "  pm.test('task RUNNING', () => pm.expect(s.tasks[0].state).to.eql('RUNNING'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Kafka Connect - eta connector status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{connectUrl}}/connectors/eta-outbox-connector/status",
+            "description": "**Purpose**\nSame check for the ETA engine outbox connector.\n\n**Prerequisites**\nConnector registered.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\nRUNNING / RUNNING."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const s = pm.response.json();",
+                  "  pm.test('connector RUNNING', () => pm.expect(s.connector.state).to.eql('RUNNING'));",
+                  "  pm.test('task RUNNING', () => pm.expect(s.tasks[0].state).to.eql('RUNNING'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Zipkin - traced services",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{zipkinUrl}}/api/v2/services",
+            "description": "**Purpose**\nDistributed tracing: after some traffic every service should show up in Zipkin.\n\n**Prerequisites**\nSome requests already sent (run folders 02/05 first).\n\n**Steps**\n1. Send the request.\n2. Open http://localhost:9411 and search traces for service api-gateway to see the span tree.\n\n**Expected result**\n200 and a JSON array of service names (empty array just means no traffic yet)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"array\", () => pm.expect(pm.response.json()).to.be.an(\"array\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 - Telemetry Simulator",
+      "description": "The simulator (ingestion service) drives train 22895 HWH>KGP>BLS>CTC>BBS>PURI at 60x speed (~6 real minutes).\nIt auto-starts ~5 s after the ingestion service boots. IMPORTANT: a journey can complete only once per journeyDate; to replay run `./infra/reset-demo.sh`.",
+      "item": [
+        {
+          "name": "Simulator - status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/simulator/status",
+            "description": "**Purpose**\nSee whether the simulator is running and where the train currently is.\n\n**Prerequisites**\nIngestion service up.\n\n**Steps**\n1. Send the request.\n2. Re-send a few times; `currentStation`, `simulatedTime` and `pingsSent` advance.\n\n**Expected result**\n200 with running, trainNumber and (when running) journeyDate, simulatedTime, currentStation, phase, pingsSent."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('has running flag', () => pm.expect(b).to.have.property('running'));",
+                  "  pm.test('train 22895', () => pm.expect(b.trainNumber).to.eql('22895'));",
+                  "  if (b.running) { pm.test('running fields', () => pm.expect(b).to.include.keys('simulatedTime','currentStation','pingsSent')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Simulator - stop",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/simulator/stop",
+            "description": "**Purpose**\nPause telemetry generation (e.g. to test manual pings or failure drills).\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n2. Run 'Simulator - status' to confirm.\n\n**Expected result**\n200 `{\"running\":false}`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"stopped\", () => pm.expect(pm.response.json().running).to.eql(false));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Simulator - start",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/simulator/start",
+            "description": "**Purpose**\n(Re)start the simulation from Howrah. Starts again from the scheduled departure of today's journey.\n\n**Prerequisites**\nIf the previous run already COMPLETED today, run ./infra/reset-demo.sh first, otherwise pings are rejected as duplicates / backward moves.\n\n**Steps**\n1. Send the request.\n2. Watch the live status folder (05) - delay and position change every second.\n\n**Expected result**\n200 with a message 'Simulator started for 22895 journeyDate=...'."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"message\", () => pm.expect(pm.response.json().message).to.include(\"Simulator started\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 - Telemetry Ingestion (CQRS command side)",
+      "description": "Tests the write side + Transactional Outbox. Uses train 12841 (Coromandel Express) so it does not clash with the simulator for 22895.\nRun requests 1-5 IN ORDER (they build a valid journey: depart HWH > GPS ping > arrive KGP > depart KGP). Then the duplicate, validation and anomaly requests.\nIf you re-run the folder on the same day set collection variable `journeyDateOverride` to yesterday/tomorrow (train runs daily; pings older than 2 days are rejected) - or run ./infra/reset-demo.sh.",
+      "item": [
+        {
+          "name": "1. Depart HWH (STATION_DEPARTURE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nSubmit a valid departure ping for 12841 from Howrah 5 minutes late (sched 14:50, actual 14:55 IST).\n\n**Prerequisites**\nInfra up, ingestion + eta + saga + query services running.\n\n**Steps**\n1. Send the request.\n2. Verify 202.\n3. In Postgres you can see the row: `docker compose exec postgres psql -U postgres -d telemetry_db -c \"select * from outbox_events order by created_at desc limit 1\"`.\n4. Debezium turns that row into Kafka topic outbox.event.TelemetryReceived.\n\n**Expected result**\n202 Accepted, body {pingId, status:ACCEPTED, eventId}. Within ~1-2 s the saga completes (folder 03).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_DEPARTURE\",\n  \"stationCode\": \"HWH\",\n  \"latitude\": 22.5839,\n  \"longitude\": 88.3425,\n  \"speedKmph\": 0,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_dep_hwh}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. GPS position between HWH and KGP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nMid-section GPS ping (55 min after departure, ~60 km/h). The ETA engine re-estimates the delay.\n\n**Prerequisites**\nRequest 1 done.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n202 ACCEPTED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 22.46,\n  \"longitude\": 87.83,\n  \"speedKmph\": 62,\n  \"source\": \"GPS\",\n  \"recordedAt\": \"{{t_pos_mid}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Cell-tower ping (same section)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nA cell-tower sourced ping (lower accuracy source) a little later.\n\n**Prerequisites**\nRequest 2 done.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n202 ACCEPTED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 22.4,\n  \"longitude\": 87.55,\n  \"speedKmph\": 70,\n  \"source\": \"CELL_TOWER\",\n  \"recordedAt\": \"{{t_pos_late}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. Arrive KGP (STATION_ARRIVAL)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nArrival at Kharagpur 3 minutes late (sched 16:30, actual 16:33).\n\n**Prerequisites**\nRequests 1-3 done.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n202 ACCEPTED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_ARRIVAL\",\n  \"stationCode\": \"KGP\",\n  \"latitude\": 22.3396,\n  \"longitude\": 87.3202,\n  \"speedKmph\": 12,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_arr_kgp}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. Depart KGP (STATION_DEPARTURE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nDeparture from Kharagpur at 16:36.\n\n**Prerequisites**\nRequest 4 done.\n\n**Steps**\n1. Send the request.\n2. Then run folder 05 -> 'Running status 12841' to see KGP crossed and downstream ETAs recalculated.\n\n**Expected result**\n202 ACCEPTED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_DEPARTURE\",\n  \"stationCode\": \"KGP\",\n  \"latitude\": 22.3396,\n  \"longitude\": 87.3202,\n  \"speedKmph\": 5,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_dep_kgp}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. Duplicate ping (idempotency)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nRe-send the exact ping from request 5. The unique dedupe key must make it a no-op (no second outbox event).\n\n**Prerequisites**\nRequest 5 done (same journeyDate).\n\n**Steps**\n1. Send the request.\n\n**Expected result**\nHTTP 200 (not 202) with status DUPLICATE.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_DEPARTURE\",\n  \"stationCode\": \"KGP\",\n  \"latitude\": 22.3396,\n  \"longitude\": 87.3202,\n  \"speedKmph\": 5,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_dep_kgp}}\",\n  \"deviceId\": \"postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"DUPLICATE\", () => pm.expect(pm.response.json().status).to.eql(\"DUPLICATE\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Validation - GPS outside India",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nCorrupted GPS (London coordinates) is rejected synchronously by the command side invariants.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n422, error INVALID_GPS.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 51.5,\n  \"longitude\": -0.12,\n  \"speedKmph\": 60,\n  \"source\": \"GPS\",\n  \"recordedAt\": \"{{t_pos_mid}}\",\n  \"deviceId\": \"bad-gps\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "  pm.test('error code INVALID_GPS', () => pm.expect(pm.response.json().error).to.eql('INVALID_GPS'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "8. Validation - impossible speed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\n500 km/h exceeds the train's max speed + 40.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n422, error INVALID_SPEED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 22.46,\n  \"longitude\": 87.83,\n  \"speedKmph\": 500,\n  \"source\": \"GPS\",\n  \"recordedAt\": \"{{t_pos_mid}}\",\n  \"deviceId\": \"bad-speed\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "  pm.test('error code INVALID_SPEED', () => pm.expect(pm.response.json().error).to.eql('INVALID_SPEED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "9. Validation - station required",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nSTATION_ARRIVAL without stationCode.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n422, error STATION_REQUIRED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_ARRIVAL\",\n  \"latitude\": 22.3396,\n  \"longitude\": 87.3202,\n  \"speedKmph\": 10,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_arr_kgp}}\",\n  \"deviceId\": \"no-station\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "  pm.test('error code STATION_REQUIRED', () => pm.expect(pm.response.json().error).to.eql('STATION_REQUIRED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "10. Validation - unknown station",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nStation code that does not exist.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n422, error UNKNOWN_STATION.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_ARRIVAL\",\n  \"stationCode\": \"XXX\",\n  \"latitude\": 22.3396,\n  \"longitude\": 87.3202,\n  \"speedKmph\": 10,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_arr_kgp}}\",\n  \"deviceId\": \"bad-station\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "  pm.test('error code UNKNOWN_STATION', () => pm.expect(pm.response.json().error).to.eql('UNKNOWN_STATION'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "11. Validation - unknown train",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nTrain number not in the seed data.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n422, error UNKNOWN_TRAIN.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"99999\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 22.5,\n  \"longitude\": 88.3,\n  \"speedKmph\": 50,\n  \"source\": \"GPS\",\n  \"recordedAt\": \"{{t_pos_mid}}\",\n  \"deviceId\": \"bad-train\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 422\", () => pm.response.to.have.status(422));",
+                  "  pm.test('error code UNKNOWN_TRAIN', () => pm.expect(pm.response.json().error).to.eql('UNKNOWN_TRAIN'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "12. Validation - missing mandatory fields (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nBean validation: blank trainNumber and missing eventType.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n400, error VALIDATION_FAILED.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"latitude\": 22.5,\n  \"longitude\": 88.3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 400\", () => pm.response.to.have.status(400));",
+                  "  pm.test(\"VALIDATION_FAILED\", () => pm.expect(pm.response.json().error).to.eql(\"VALIDATION_FAILED\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "13. ANOMALY - impossible station jump (accepted, then compensated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nA syntactically valid ping that violates domain rules: 12841 reported at Chennai (MAS) while last known position is KGP. Ingestion accepts it (202); the ETA engine rejects it and the SAGA compensates.\n\n**Prerequisites**\nRequests 1-5 done.\n\n**Steps**\n1. Send the request (expect 202).\n2. Wait ~2 s.\n3. Run folder 03 -> 'FAILED sagas' : a FAILED saga with failureReason IMPOSSIBLE_STATION_JUMP appears.\n4. Run 'Recent pings (12841)' below : that ping now has anomaly=true (saga compensation command).\n\n**Expected result**\n202 now; saga FAILED, ping flagged anomaly=true, NO change in the live view.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_ARRIVAL\",\n  \"stationCode\": \"MAS\",\n  \"latitude\": 13.0827,\n  \"longitude\": 80.2757,\n  \"speedKmph\": 90,\n  \"source\": \"CELL_TOWER\",\n  \"recordedAt\": \"{{t_anomaly}}\",\n  \"deviceId\": \"anomaly-jump\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "14. ANOMALY - backward station move",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nArrival at HWH reported after the train already left KGP (BACKWARD_STATION_MOVE).\n\n**Prerequisites**\nRequests 1-5 done.\n\n**Steps**\n1. Send the request.\n2. Check saga failure reason after ~2 s.\n\n**Expected result**\n202; saga FAILED with BACKWARD_STATION_MOVE.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"STATION_ARRIVAL\",\n  \"stationCode\": \"HWH\",\n  \"latitude\": 22.5839,\n  \"longitude\": 88.3425,\n  \"speedKmph\": 10,\n  \"source\": \"STATION_CROSSING\",\n  \"recordedAt\": \"{{t_anomaly_back}}\",\n  \"deviceId\": \"anomaly-back\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 202\", () => pm.response.to.have.status(202));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('ACCEPTED with ids', () => { pm.expect(b.status).to.eql('ACCEPTED'); pm.expect(b.pingId).to.be.a('number'); pm.expect(b.eventId).to.be.a('string'); });",
+                  "  pm.collectionVariables.set('lastPingId', b.pingId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "15. Recent pings (12841)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/telemetry/recent?trainNumber=12841&journeyDate={{journeyDate}}",
+            "description": "**Purpose**\nRead back the last 20 stored pings, including anomaly flags set by the saga compensation.\n\n**Prerequisites**\nRequests above done.\n\n**Steps**\n1. Send the request.\n2. Wait 2-3 s after requests 13/14 so the compensation command has been processed.\n\n**Expected result**\n200 array (newest first). Pings from 13 and 14 have anomaly=true and an anomalyReason."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  pm.test('array of pings', () => pm.expect(a).to.be.an('array').that.is.not.empty);",
+                  "  pm.test('each ping has fields', () => a.forEach(p => pm.expect(p).to.include.keys('id','trainNumber','eventType','anomaly')));",
+                  "  pm.test('informational: anomalous pings flagged = ' + a.filter(p => p.anomaly).length, () => pm.expect(true).to.be.true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 - Saga Orchestrator",
+      "description": "Inspect the persistent saga state machine: STARTED > ETA_CALCULATED > BOARD_UPDATED > COMPLETED, or COMPENSATING > FAILED.",
+      "item": [
+        {
+          "name": "Saga stats (count per state)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/sagas/stats",
+            "description": "**Purpose**\nCounts of sagas by state - the quickest health signal of the whole pipeline.\n\n**Prerequisites**\nTelemetry has flowed (simulator or folder 02).\n\n**Steps**\n1. Send the request.\n2. Send again after 10 s: COMPLETED should increase while the simulator runs.\n\n**Expected result**\n200; keys STARTED, ETA_CALCULATED, BOARD_UPDATED, COMPLETED, COMPENSATING, FAILED."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const s = pm.response.json();",
+                  "  ['STARTED','ETA_CALCULATED','BOARD_UPDATED','COMPLETED','COMPENSATING','FAILED'].forEach(k => pm.test('has ' + k, () => pm.expect(s).to.have.property(k)));",
+                  "  pm.test('some sagas completed', () => pm.expect(s.COMPLETED).to.be.above(0));",
+                  "  pm.test('few stuck sagas', () => pm.expect(s.STARTED + s.ETA_CALCULATED).to.be.below(20));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Latest sagas",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/sagas",
+            "description": "**Purpose**\nLast 50 sagas, newest first.\n\n**Prerequisites**\nTelemetry has flowed.\n\n**Steps**\n1. Send the request.\n2. The test stores the newest saga id in `sagaId`.\n\n**Expected result**\n200 array of saga rows with state and history."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  pm.test('array', () => pm.expect(a).to.be.an('array').that.is.not.empty);",
+                  "  pm.collectionVariables.set('sagaId', a[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Completed sagas",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/sagas?state=COMPLETED",
+            "description": "**Purpose**\nFilter by state; open `history` to see each transition with timestamps.\n\n**Prerequisites**\nTelemetry has flowed.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\nEvery returned saga has state COMPLETED."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  pm.test('all COMPLETED', () => a.forEach(s => pm.expect(s.state).to.eql('COMPLETED')));",
+                  "  pm.test('history contains full path', () => { if (a.length) { ['STARTED','ETA_CALCULATED','BOARD_UPDATED','COMPLETED'].forEach(x => pm.expect(a[0].history).to.include(x)); } });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "FAILED sagas (anomalies / compensation)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/sagas?state=FAILED",
+            "description": "**Purpose**\nSagas that were compensated. After folder 02 requests 13/14 or 'inject anomaly' you should see entries.\n\n**Prerequisites**\nRun 02/13 or 04 -> 'Inject anomaly' first.\n\n**Steps**\n1. Send the request.\n2. Read failureReason (e.g. IMPOSSIBLE_STATION_JUMP, BACKWARD_STATION_MOVE) and the history lines COMPENSATING > FAILED.\n\n**Expected result**\n200; each item state FAILED with failureReason."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  pm.test('all FAILED', () => a.forEach(s => pm.expect(s.state).to.eql('FAILED')));",
+                  "  pm.test('failure reasons present', () => a.forEach(s => pm.expect(s.failureReason).to.be.a('string')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Saga by id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/sagas/{{sagaId}}",
+            "description": "**Purpose**\nFull detail of one saga.\n\n**Prerequisites**\nRun 'Latest sagas' first to fill {{sagaId}}.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with the saga, or 404 if the id is unknown."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const s = pm.response.json();",
+                  "  pm.test('id matches', () => pm.expect(s.id).to.eql(pm.collectionVariables.get('sagaId')));",
+                  "  pm.test('has history', () => pm.expect(s.history).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 - Saga Compensation Demo (Simulator)",
+      "description": "Uses the built-in simulator train 22895.",
+      "item": [
+        {
+          "name": "Inject anomaly (HWH -> PURI jump)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/simulator/inject-anomaly",
+            "description": "**Purpose**\nSends an impossible STATION_ARRIVAL at PURI for 22895 while the train is near Howrah. Demonstrates the compensating transaction.\n\n**Prerequisites**\nSimulator running (folder 01) and at least one pending departure processed.\n\n**Steps**\n1. Send the request (returns 202-style accepted body).\n2. Wait ~3 s.\n3. Run folder 03 -> 'FAILED sagas'. You should see failureReason IMPOSSIBLE_STATION_JUMP or IMPOSSIBLE_SPEED.\n4. Run folder 05 -> 'Running status 22895': live view was NOT corrupted (still near the real position).\n\n**Expected result**\nResponse {status:ACCEPTED,...}; a FAILED saga appears; live status unaffected."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"accepted or duplicate\", () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
+                  "pm.test(\"body has status\", () => pm.expect(pm.response.json()).to.have.property('status'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 - ETA Engine Diagnostics",
+      "description": "Direct view of the command-side ETA aggregate (user traffic should use the query side).",
+      "item": [
+        {
+          "name": "ETA engine state 22895",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/eta/22895/{{journeyDate}}/state",
+            "description": "**Purpose**\nWrite-side aggregate for 22895: last station index, departed flag, current delay.\n\n**Prerequisites**\nTelemetry for the train has been processed.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with lastSeq, departed, delayMinutes (404 if the train has no telemetry today)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404', () => pm.expect(pm.response.code).to.be.oneOf([200, 404]));",
+                  "if (pm.response.code === 200) { const s = pm.response.json(); pm.test('state fields', () => pm.expect(s).to.include.keys('lastSeq','departed','delayMinutes')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ETA engine state 12841",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/eta/12841/{{journeyDate}}/state",
+            "description": "**Purpose**\nWrite-side aggregate for 12841: last station index, departed flag, current delay.\n\n**Prerequisites**\nTelemetry for the train has been processed.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with lastSeq, departed, delayMinutes (404 if the train has no telemetry today)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404', () => pm.expect(pm.response.code).to.be.oneOf([200, 404]));",
+                  "if (pm.response.code === 200) { const s = pm.response.json(); pm.test('state fields', () => pm.expect(s).to.include.keys('lastSeq','departed','delayMinutes')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Latest ETA projection 22895",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/eta/22895/{{journeyDate}}/latest-projection",
+            "description": "**Purpose**\nLatest recalculation row incl. the snapshot used for compensation (prev_* fields).\n\n**Prerequisites**\nSimulator running.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with id, sagaId, delayMinutes, reverted=false."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 404', () => pm.expect(pm.response.code).to.be.oneOf([200, 404]));",
+                  "if (pm.response.code === 200) { const p = pm.response.json(); pm.test('projection fields', () => pm.expect(p).to.include.keys('sagaId','delayMinutes','reverted')); }"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 - Query Side (CQRS reads via Gateway)",
+      "description": "All reads served from Redis / MongoDB through the API gateway (rate-limited and circuit-broken).",
+      "item": [
+        {
+          "name": "Running status 22895 (live, simulator)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/22895/running-status?journeyDate={{journeyDate}}",
+            "description": "**Purpose**\nLive Train Running Status: current location, crossed stations, upcoming stations, actual vs scheduled, delay and ETA to destination.\n\n**Prerequisites**\nSimulator running (or finished) for today's date.\n\n**Steps**\n1. Send the request.\n2. Send it 3-4 times 5 s apart: delayMinutes, latitude/longitude, lastCrossedStation change.\n3. Compare `crossedStations[].actualDeparture` with `scheduledDeparture` for the real delay at each station.\n\n**Expected result**\n200. status NOT_STARTED / RUNNING / COMPLETED; destinationEta; crossedStations & upcomingStations arrays."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('train 22895 Puri Vande Bharat', () => { pm.expect(b.trainNumber).to.eql('22895'); pm.expect(b.trainName).to.include('Vande Bharat'); });",
+                  "  pm.test('status valid', () => pm.expect(['NOT_STARTED','RUNNING','COMPLETED']).to.include(b.status));",
+                  "  pm.test('required fields', () => pm.expect(b).to.include.keys('delayMinutes','destinationEta','crossedStations','upcomingStations','nextStation'));",
+                  "  pm.test('6 stops in total', () => pm.expect(b.crossedStations.length + b.upcomingStations.length).to.eql(6));",
+                  "  pm.test('crossed + upcoming are disjoint', () => b.crossedStations.forEach(c => pm.expect(b.upcomingStations.map(u => u.seq)).to.not.include(c.seq)));",
+                  "",
+                  "  const stops = b.crossedStations.concat(b.upcomingStations);",
+                  "  pm.test('stops ordered by seq', () => { for (let i = 1; i < stops.length; i++) pm.expect(stops[i].seq).to.be.above(stops[i-1].seq); });",
+                  "  pm.test('stop fields', () => stops.forEach(s => pm.expect(s).to.include.keys('stationCode','scheduledArrival','expectedArrival','arrivalDelayMinutes','crossed')));",
+                  "",
+                  "  pm.collectionVariables.set('lastDelay22895', b.delayMinutes);",
+                  "  console.log('22895', b.status, 'delay', b.delayMinutes, 'last', b.lastCrossedStation, 'next', b.nextStation);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Running status 12841 (manual telemetry)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/12841/running-status?journeyDate={{journeyDate}}",
+            "description": "**Purpose**\nAfter folder 02 requests 1-5 Coromandel Express must show HWH and KGP as crossed and a recalculated ETA.\n\n**Prerequisites**\nFolder 02 requests 1-5 done and saga COMPLETED.\n\n**Steps**\n1. Send the request.\n2. Check lastCrossedStation = KGP, nextStation = BLS.\n3. Check anomaly requests (13/14) did NOT change this view.\n\n**Expected result**\n200, status RUNNING, crossedStations contain HWH and KGP."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('train 12841', () => pm.expect(b.trainNumber).to.eql('12841'));",
+                  "  pm.test('RUNNING after manual pings', () => pm.expect(b.status).to.eql('RUNNING'));",
+                  "  pm.test('HWH and KGP crossed', () => { const c = b.crossedStations.map(s => s.stationCode); pm.expect(c).to.include.members(['HWH','KGP']); });",
+                  "  pm.test('next station is BLS', () => pm.expect(b.nextStation).to.eql('BLS'));",
+                  "  pm.test('departure delay HWH ~5 min', () => pm.expect(b.crossedStations.find(s => s.stationCode==='HWH').departureDelayMinutes).to.be.within(4, 6));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Running status - unknown train (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/99999/running-status?journeyDate={{journeyDate}}",
+            "description": "**Purpose**\nNegative test.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n404."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Station-to-station HWH -> BBS",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/between?from=HWH&to=BBS&date={{journeyDate}}",
+            "description": "**Purpose**\nStation-to-Station Search (MongoDB route search joined with live Redis delay).\n\n**Prerequisites**\nQuery service seeded Mongo (automatic at startup).\n\n**Steps**\n1. Send the request.\n2. Both 22895 and 12841 are returned sorted by scheduled departure.\n3. While the simulator runs, 22895 shows live=true and a changing delayMinutes.\n\n**Expected result**\n200 array with trainNumber, scheduledDeparture/Arrival, expectedDeparture/Arrival, delayMinutes, status, live."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  const nums = a.map(r => r.trainNumber);",
+                  "  pm.test('contains 22895 and 12841', () => pm.expect(nums).to.include.members(['22895','12841']));",
+                  "  pm.test('sorted by scheduled departure', () => { for (let i=1;i<a.length;i++) pm.expect(new Date(a[i].scheduledDeparture) >= new Date(a[i-1].scheduledDeparture)).to.be.true; });",
+                  "  pm.test('arrival after departure', () => a.forEach(r => pm.expect(new Date(r.scheduledArrival) > new Date(r.scheduledDeparture)).to.be.true));",
+                  "  pm.test('result fields', () => a.forEach(r => pm.expect(r).to.include.keys('delayMinutes','status','live','durationMinutes')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Station-to-station reverse BBS -> HWH (empty)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/between?from=BBS&to=HWH&date={{journeyDate}}",
+            "description": "**Purpose**\nWrong direction: no train runs BBS>HWH in the seed data.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with an empty array."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"empty\", () => pm.expect(pm.response.json()).to.be.an(\"array\").that.is.empty);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Station-to-station KGP -> PURI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/between?from=KGP&to=PURI&date={{journeyDate}}",
+            "description": "**Purpose**\nIntermediate origin: only 22895 stops at both KGP and PURI.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\nOnly 22895."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const nums = pm.response.json().map(r => r.trainNumber);",
+                  "  pm.test('only 22895', () => pm.expect(nums).to.eql(['22895']));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Live board HWH",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/HWH/board?hours=4",
+            "description": "**Purpose**\nLive Station Departure Board for HWH: trains in the next 4 hours with platform and expected times. Boards use the newest telemetry timestamp as 'now' so the simulation is visible at any time of day.\n\n**Prerequisites**\nSimulator running (boards are also pre-seeded with the schedule at startup).\n\n**Steps**\n1. Send the request.\n2. Look at platform, expectedArrival, expectedDeparture, delayMinutes, status (EXPECTED / AT_PLATFORM / DEPARTED).\n3. Repeat while the simulator runs: entries move and delays change.\n\n**Expected result**\n200 with stationCode, asOf, windowHours and a time-sorted trains[] array."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('station HWH', () => pm.expect(b.stationCode).to.eql('HWH'));",
+                  "  pm.test('board shape', () => pm.expect(b).to.include.keys('asOf','windowHours','trains'));",
+                  "  pm.test('entries valid', () => b.trains.forEach(t => { pm.expect(t).to.include.keys('trainNumber','platform','expectedArrival','delayMinutes','status'); pm.expect(['EXPECTED','AT_PLATFORM','DEPARTED']).to.include(t.status); }));",
+                  "  pm.test('sorted by time', () => { for (let i=1;i<b.trains.length;i++) pm.expect(new Date(b.trains[i].expectedArrival) >= new Date(b.trains[i-1].expectedArrival)).to.be.true; });",
+                  "  console.log('HWH board has', b.trains.length, 'trains');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Live board KGP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/KGP/board?hours=4",
+            "description": "**Purpose**\nLive Station Departure Board for KGP: trains in the next 4 hours with platform and expected times. Boards use the newest telemetry timestamp as 'now' so the simulation is visible at any time of day.\n\n**Prerequisites**\nSimulator running (boards are also pre-seeded with the schedule at startup).\n\n**Steps**\n1. Send the request.\n2. Look at platform, expectedArrival, expectedDeparture, delayMinutes, status (EXPECTED / AT_PLATFORM / DEPARTED).\n3. Repeat while the simulator runs: entries move and delays change.\n\n**Expected result**\n200 with stationCode, asOf, windowHours and a time-sorted trains[] array."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('station KGP', () => pm.expect(b.stationCode).to.eql('KGP'));",
+                  "  pm.test('board shape', () => pm.expect(b).to.include.keys('asOf','windowHours','trains'));",
+                  "  pm.test('entries valid', () => b.trains.forEach(t => { pm.expect(t).to.include.keys('trainNumber','platform','expectedArrival','delayMinutes','status'); pm.expect(['EXPECTED','AT_PLATFORM','DEPARTED']).to.include(t.status); }));",
+                  "  pm.test('sorted by time', () => { for (let i=1;i<b.trains.length;i++) pm.expect(new Date(b.trains[i].expectedArrival) >= new Date(b.trains[i-1].expectedArrival)).to.be.true; });",
+                  "  console.log('KGP board has', b.trains.length, 'trains');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Live board BBS",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/BBS/board?hours=4",
+            "description": "**Purpose**\nLive Station Departure Board for BBS: trains in the next 4 hours with platform and expected times. Boards use the newest telemetry timestamp as 'now' so the simulation is visible at any time of day.\n\n**Prerequisites**\nSimulator running (boards are also pre-seeded with the schedule at startup).\n\n**Steps**\n1. Send the request.\n2. Look at platform, expectedArrival, expectedDeparture, delayMinutes, status (EXPECTED / AT_PLATFORM / DEPARTED).\n3. Repeat while the simulator runs: entries move and delays change.\n\n**Expected result**\n200 with stationCode, asOf, windowHours and a time-sorted trains[] array."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  pm.test('station BBS', () => pm.expect(b.stationCode).to.eql('BBS'));",
+                  "  pm.test('board shape', () => pm.expect(b).to.include.keys('asOf','windowHours','trains'));",
+                  "  pm.test('entries valid', () => b.trains.forEach(t => { pm.expect(t).to.include.keys('trainNumber','platform','expectedArrival','delayMinutes','status'); pm.expect(['EXPECTED','AT_PLATFORM','DEPARTED']).to.include(t.status); }));",
+                  "  pm.test('sorted by time', () => { for (let i=1;i<b.trains.length;i++) pm.expect(new Date(b.trains[i].expectedArrival) >= new Date(b.trains[i-1].expectedArrival)).to.be.true; });",
+                  "  console.log('BBS board has', b.trains.length, 'trains');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Board HWH at fixed time (asOf 06:00 IST)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/HWH/board?hours=4&asOf={{t_asof}}",
+            "description": "**Purpose**\nExplicit reference time: shows the 22895 departure (06:10 IST) regardless of the simulator clock.\n\n**Prerequisites**\nServices up (boards pre-seeded).\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 and 22895 appears with platform 8."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const b = pm.response.json();",
+                  "  const t = b.trains.find(x => x.trainNumber === '22895');",
+                  "  pm.test('22895 on board', () => pm.expect(t).to.exist);",
+                  "  pm.test('platform 8', () => pm.expect(t.platform).to.eql('8'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delay history 22895 (MongoDB)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/trains/22895/delay-history?journeyDate={{journeyDate}}",
+            "description": "**Purpose**\nHistorical delay projection points, one per station event.\n\n**Prerequisites**\nSimulator crossed at least one station.\n\n**Steps**\n1. Send the request.\n2. Plot delayMinutes vs recordedAt to see how delay evolved.\n\n**Expected result**\n200 array ordered by recordedAt."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const a = pm.response.json();",
+                  "  pm.test('array', () => pm.expect(a).to.be.an('array'));",
+                  "  pm.test('chronological', () => { for (let i=1;i<a.length;i++) pm.expect(new Date(a[i].recordedAt) >= new Date(a[i-1].recordedAt)).to.be.true; });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "07 - Real-time Push (WebSocket / SSE)",
+      "description": "Postman cannot natively speak STOMP, so use the bundled test page for WebSocket and Postman/curl for SSE.\n\nWebSocket (STOMP over SockJS):\n1. Open http://localhost:8084/live.html (or via gateway http://localhost:8080/live.html).\n2. Train 22895, today's date, click Connect. Log shows 'connected; subscribing to /topic/trains/22895/<date>'.\n3. With the simulator running a message arrives about every second (delay, changedStops count). Station topic: /topic/stations/HWH.\n4. Raw endpoints for other clients: SockJS info GET /ws/info; raw WebSocket ws://localhost:8084/ws/websocket (needs STOMP frames terminated by a NUL byte - not typeable in Postman).",
+      "item": [
+        {
+          "name": "SockJS info endpoint",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/ws/info",
+            "description": "**Purpose**\nConfirms the SockJS/STOMP endpoint is exposed.\n\n**Prerequisites**\nQuery service up.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with websocket:true."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"websocket enabled\", () => pm.expect(pm.response.json().websocket).to.eql(true));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SockJS info through gateway",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/ws/info",
+            "description": "**Purpose**\nSame endpoint through the gateway (HTTP route for SockJS fallbacks; ws:// upgrades use lb:ws).\n\n**Prerequisites**\nGateway + query up.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Live test console page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/live.html",
+            "description": "**Purpose**\nStatic STOMP test page.\n\n**Prerequisites**\nQuery service up.\n\n**Steps**\n1. Send, or open the URL in a browser.\n\n**Expected result**\n200 text/html."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"html\", () => pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/html\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SSE stream train 22895",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/stream/trains/22895/{{journeyDate}}",
+            "description": "**Purpose**\nServer-Sent Events alternative to WebSocket.\n\n**Prerequisites**\nSimulator running. Postman shows streamed events in real time (stop with Cancel); curl equivalent: curl -N URL.\n\n**Steps**\n1. Send the request and leave it open.\n2. First event 'snapshot' (current view), then 'live-update' events roughly every second.\n3. Click Cancel to stop.\n\n**Expected result**\n200 text/event-stream with events snapshot / live-update."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"event stream\", () => pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"text/event-stream\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "08 - API Gateway: Rate Limiting, Fallback, Routing",
+      "description": "Gateway config: Redis token bucket replenishRate=20/s, burstCapacity=40, key = X-API-Key header or client IP. Circuit breakers (3 s time limiter) forward to /fallback/* endpoints.",
+      "item": [
+        {
+          "name": "Rate limit - reset counters",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/actuator/health",
+            "description": "**Purpose**\nResets the counters used by the burst test.\n\n**Prerequisites**\nNone.\n\n**Steps**\n1. Send once before the Runner burst.\n\n**Expected result**\n200."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('rl_ok', 0); pm.collectionVariables.set('rl_429', 0);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rate limit - burst target",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/HWH/board?hours=4",
+            "description": "**Purpose**\nHit this request ~100 times with zero delay to drain the bucket.\n\n**Prerequisites**\nCollection Runner: select ONLY this request, Iterations = 100, Delay = 0 ms. Alternatively: `for i in $(seq 1 100); do curl -s -o /dev/null -w '%{http_code} ' URL; done`.\n\n**Steps**\n1. Run 'Rate limit - reset counters' once.\n2. Run this request in the Runner 100 iterations, delay 0.\n3. Read the console summary (rl_ok / rl_429).\n\n**Expected result**\nFirst ~40 responses 200, then HTTP 429 (Too Many Requests) interleaved as tokens refill at 20/s. Every response has X-RateLimit-* headers."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 or 429', () => pm.expect(pm.response.code).to.be.oneOf([200, 429]));",
+                  "pm.test('X-RateLimit headers present', () => { pm.expect(pm.response.headers.has('X-RateLimit-Remaining')).to.be.true; pm.expect(pm.response.headers.get('X-RateLimit-Burst-Capacity')).to.eql('40'); pm.expect(pm.response.headers.get('X-RateLimit-Replenish-Rate')).to.eql('20'); });",
+                  "const k = pm.response.code === 429 ? 'rl_429' : 'rl_ok';",
+                  "pm.collectionVariables.set(k, Number(pm.collectionVariables.get(k) || 0) + 1);",
+                  "console.log('ok=' + pm.collectionVariables.get('rl_ok') + ' limited=' + pm.collectionVariables.get('rl_429') + ' remaining=' + pm.response.headers.get('X-RateLimit-Remaining'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rate limit - separate bucket per API key",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/query/stations/HWH/board?hours=4",
+            "description": "**Purpose**\nSame endpoint with a different X-API-Key is a different token bucket, so it succeeds even while the IP bucket is drained.\n\n**Prerequisites**\nRun right after the burst test.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 and X-RateLimit-Remaining close to 39."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"fresh bucket\", () => pm.expect(Number(pm.response.headers.get(\"X-RateLimit-Remaining\"))).to.be.above(30));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Route - gateway route table",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/actuator/gateway/routes",
+            "description": "**Purpose**\nLists configured routes (lb:// load-balanced).\n\n**Prerequisites**\nGateway up.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 with 7 routes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const ids = pm.response.json().map(r => r.route_id);",
+                  "  ['query-service','query-stream-sse','query-websocket','telemetry-ingestion','saga-orchestrator','eta-engine'].forEach(i => pm.test('route ' + i, () => pm.expect(ids).to.include(i)));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fallback - query service down (cached response)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/query/stations/HWH/board?hours=4",
+            "description": "**Purpose**\nResilience drill: Circuit breaker + cached degraded response.\n\n**Prerequisites**\nDo 'Live board HWH' once first (so the gateway caches it).\n\n**Steps**\n1. Send this request while everything is up: 200, no X-Degraded header.\n2. STOP train-query-service (Ctrl+C).\n3. Send this same request again (identical URL): HTTP 200 with header X-Degraded: cached-response and header Warning.\n4. Request a URL never requested before, e.g. /stations/CTC/board: 503 with X-Degraded: no-cache and Retry-After.\n5. Start the query service again; after ~10 s the circuit half-opens and normal responses return.\n\n**Expected result**\nCached body served while the service is down; 503 degraded JSON when no cache exists."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 (normal/cached) or 503 (degraded, no cache)', () => pm.expect(pm.response.code).to.be.oneOf([200, 503]));",
+                  "if (pm.response.headers.has('X-Degraded')) { console.log('DEGRADED MODE:', pm.response.headers.get('X-Degraded')); pm.test('Retry/Warning semantics', () => pm.expect(['cached-response','no-cache']).to.include(pm.response.headers.get('X-Degraded'))); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fallback - ingestion down (503 + Retry-After)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/telemetry",
+            "description": "**Purpose**\nResilience drill for the command API.\n\n**Prerequisites**\nStop telemetry-ingestion-service first.\n\n**Steps**\n1. Stop the ingestion service.\n2. Send the request.\n3. Restart the service afterwards.\n\n**Expected result**\n503 with Retry-After: 10 and body {degraded:true, service:telemetry-ingestion-service}. (When the service is up: 202/200.)",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainNumber\": \"12841\",\n  \"journeyDate\": \"{{journeyDate}}\",\n  \"eventType\": \"POSITION\",\n  \"latitude\": 22.46,\n  \"longitude\": 87.83,\n  \"speedKmph\": 62,\n  \"source\": \"GPS\",\n  \"recordedAt\": \"{{t_pos_mid}}\",\n  \"deviceId\": \"fallback-test\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202/200 when up, 503 when down', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 503]));",
+                  "if (pm.response.code === 503) { pm.test('degraded body', () => { const b = pm.response.json(); pm.expect(b.degraded).to.eql(true); pm.expect(pm.response.headers.get('Retry-After')).to.eql('10'); }); }"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "09 - Resilience4j & Observability",
+      "description": "Circuit breaker / retry / bulkhead state of the query service and metrics of the command services.",
+      "item": [
+        {
+          "name": "Query service circuit breakers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/actuator/circuitbreakers",
+            "description": "**Purpose**\nResilience4j @CircuitBreaker state for Redis and Mongo reads.\n\n**Prerequisites**\nQuery service up.\n\n**Steps**\n1. Send the request.\n2. Stop Redis (`docker compose stop redis`), call running-status a few times, send again: redisRead goes OPEN and responses become stale/503.\n3. `docker compose start redis` and watch it return to CLOSED after the wait duration.\n\n**Expected result**\n200 with redisRead and mongoRead breakers (CLOSED when healthy)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  const cb = pm.response.json().circuitBreakers;",
+                  "  pm.test('redisRead breaker', () => pm.expect(cb).to.have.property('redisRead'));",
+                  "  pm.test('mongoRead breaker', () => pm.expect(cb).to.have.property('mongoRead'));",
+                  "  console.log('redisRead', cb.redisRead.state, 'mongoRead', cb.mongoRead.state);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Query service retries",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/actuator/retries",
+            "description": "**Purpose**\nConfigured @Retry instances.\n\n**Prerequisites**\nQuery service up.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Query service bulkheads",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{queryUrl}}/actuator/bulkheads",
+            "description": "**Purpose**\nConfigured @Bulkhead instances.\n\n**Prerequisites**\nQuery service up.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metric - telemetry accepted",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ingestionUrl}}/actuator/metrics/telemetry.accepted",
+            "description": "**Purpose**\nCounter incremented for every accepted ping.\n\n**Prerequisites**\nSimulator or folder 02 ran.\n\n**Steps**\n1. Send the request.\n2. Send again later; the value increases.\n\n**Expected result**\n200 with measurements[0].value > 0."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"counter > 0\", () => pm.expect(pm.response.json().measurements[0].value).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metric - saga completed",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{sagaUrl}}/actuator/metrics/saga.completed",
+            "description": "**Purpose**\nCounter of completed sagas.\n\n**Prerequisites**\nTelemetry flowed.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 value > 0."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"counter > 0\", () => pm.expect(pm.response.json().measurements[0].value).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metric - ETA recalculated",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{etaUrl}}/actuator/metrics/eta.recalculated",
+            "description": "**Purpose**\nCounter of ETA recalculations.\n\n**Prerequisites**\nTelemetry flowed.\n\n**Steps**\n1. Send the request.\n\n**Expected result**\n200 value > 0."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+                  "  pm.test(\"counter > 0\", () => pm.expect(pm.response.json().measurements[0].value).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Journey date = today in IST unless journeyDateOverride is set (e.g. to re-run folder 02 on a fresh date)",
+          "const ov = pm.collectionVariables.get('journeyDateOverride');",
+          "const jd = ov && ov.trim() ? ov.trim() : new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);",
+          "pm.collectionVariables.set('journeyDate', jd);",
+          "const ist = hhmm => new Date(jd + 'T' + hhmm + ':00+05:30').toISOString();",
+          "pm.collectionVariables.set('t_dep_hwh', ist('14:55'));",
+          "pm.collectionVariables.set('t_pos_mid', ist('15:50'));",
+          "pm.collectionVariables.set('t_pos_late', ist('16:10'));",
+          "pm.collectionVariables.set('t_arr_kgp', ist('16:33'));",
+          "pm.collectionVariables.set('t_dep_kgp', ist('16:36'));",
+          "pm.collectionVariables.set('t_anomaly', ist('16:40'));",
+          "pm.collectionVariables.set('t_anomaly_back', ist('16:45'));",
+          "pm.collectionVariables.set('t_asof', ist('06:00'));"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "ingestionUrl",
+      "value": "http://localhost:8081",
+      "type": "string"
+    },
+    {
+      "key": "sagaUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    },
+    {
+      "key": "etaUrl",
+      "value": "http://localhost:8083",
+      "type": "string"
+    },
+    {
+      "key": "queryUrl",
+      "value": "http://localhost:8084",
+      "type": "string"
+    },
+    {
+      "key": "eurekaUrl",
+      "value": "http://localhost:8761",
+      "type": "string"
+    },
+    {
+      "key": "connectUrl",
+      "value": "http://localhost:8085",
+      "type": "string"
+    },
+    {
+      "key": "zipkinUrl",
+      "value": "http://localhost:9411",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "postman-demo-key",
+      "type": "string"
+    },
+    {
+      "key": "journeyDateOverride",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "journeyDate",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "sagaId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "lastPingId",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

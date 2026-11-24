@@ -1,0 +1,102 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: api-gateway
+  threads:
+    virtual:
+      enabled: true
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  cloud:
+    loadbalancer:
+      cache:
+        ttl: 5s
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: false
+          default-filters:
+            # Redis token bucket per API key / client IP: 20 req/s steady, bursts of 40
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20
+                redis-rate-limiter.burstCapacity: 40
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@clientKeyResolver}"
+          routes:
+            - id: query-service
+              uri: lb://train-query-service
+              predicates:
+                - Path=/api/v1/query/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: queryCb
+                    fallbackUri: forward:/fallback/query
+            - id: query-stream-sse
+              uri: lb://train-query-service
+              predicates:
+                - Path=/api/v1/stream/**
+            - id: query-websocket
+              uri: lb:ws://train-query-service
+              predicates:
+                - Path=/ws/**
+                - Header=Upgrade, websocket
+            - id: query-sockjs-http
+              uri: lb://train-query-service
+              predicates:
+                - Path=/ws/**,/live.html
+            - id: telemetry-ingestion
+              uri: lb://telemetry-ingestion-service
+              predicates:
+                - Path=/api/v1/telemetry/**,/api/v1/simulator/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: ingestCb
+                    fallbackUri: forward:/fallback/ingest
+            - id: saga-orchestrator
+              uri: lb://train-saga-orchestrator
+              predicates:
+                - Path=/api/v1/sagas/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: sagaCb
+                    fallbackUri: forward:/fallback/saga
+            - id: eta-engine
+              uri: lb://eta-engine-service
+              predicates:
+                - Path=/api/v1/eta/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: etaCb
+                    fallbackUri: forward:/fallback/eta
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+  instance:
+    prefer-ip-address: true
+
+gateway:
+  fallback-cache-ttl-seconds: 600
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,gateway,circuitbreakers
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
